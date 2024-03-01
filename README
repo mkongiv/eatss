@@ -1,0 +1,210 @@
+Energy-Aware Tile Size Selection (EATSS)
+========================================
+
+TLDR
+====
+EATSS project has two steps; 
+  (i) tile size generation using our proposed energy-aware model. 
+  (ii) using PPCG code generator to generate CUDA code with chosen 
+       tile sizes, launch on an NVIDIA GPU while 
+       collecting power information as a background process automatically.
+
+Step(i) does NOT require a GPU as a Non-linear integer programming optimization
+is performed. Generation of tile sizes must be performed in an x86_64 
+based system as the Z3 solver does not support architectures such as Aarch64.
+
+  Step(i): quick installation
+  ===========================
+  1. Navigate to eatss-gpus.
+     `cd eatss-gpus`
+
+  2. Create anaconda environment.
+     `conda create --name eatss --file conda-env-z3-reqs.txt`
+
+  3. Activate anaconda environment.
+     `conda activate eatss`
+
+  4. Fix additional dependency issue. 
+     `pip install z3-solver`
+
+  5. Generate tile sizes for Polybench benchmarks.
+     `cd eatss-gpus/tile-size-selector`	
+     `python ./gen-all.sh a100 1.0`
+     `python ./gen-all.sh xavier 1.0`
+
+  6. Generate tile sizes for non-Polybench benchmarks.
+     `cd eatss-gpus/tile-size-selector`	
+     `python ./gen-heavy.sh`
+
+
+Step(ii) does require a GPU and also requires the following software 
+dependencies. It is recommended to use the provided Docker / Singularity def
+files to resolve these dependencies. 
+  LLVM/Clang v8.0.0
+  isl v0.24
+  pet v0.11.4
+  ppcg 0.08
+
+
+
+Singularity build
+=================
+build:
+sudo permission is required for the build. If sudo permissions
+are not available on the cluster, build in local environment and copy the SIF.
+
+`sudo singularity build eatss.sif Singularity.def`
+
+run:
+place eatss.sif file in the root directory of the repository.
+binds the eatss-gpus folder on the host to /home on the container.
+This enables the creation of files.
+
+`singularity shell --nv --bind ./eatss-gpus:/home/eatss-gpus eatss.sif`
+
+Docker build
+============
+build:
+`sudo docker build -t eatss-gpu:v0.1 .`
+
+run:
+`sudo docker run -it --gpus=all eatss-gpu:v0.1`
+
+
+Generate Tile Sizes
+===================
+1. Navigate to the folder.
+   `cd /home/eatss-gpu/tile-size-selector/`
+
+2. Activate conda environment.
+   `. /opt/anaconda3/bin/activate`
+   `conda activate eatss`
+
+3. Generate tile sizes for Polybench benchmarks.
+   `python ./gen-all.sh`
+
+4. Generate tile sizes for non-Polybench benchmarks.
+   `python ./gen-heavy.sh`
+
+Profile
+=======
+
+1. Navigate to the folder.
+   `cd /home/eatss-gpu/profile/`
+
+2. Ensure nvidia-smi and ncu / nvprof is enabled with
+   necessary user permissions for hardware counter acccess.
+   Set profiler path.
+   `export NCU_PROFILER_PATH="$(which ncu)"`
+   e.g.,:-
+   `export NCU_PROFILER_PATH="/shared/centos7/nsight/2021.3.1/ncu"`
+
+3. Set nvcc flags depending on the hardware:
+   `export NVCC_COMPUTE_CAP=$(echo "(10 * ` nvidia-smi --query-gpu=compute_cap --format=csv,noheader,nounits `)/1" | bc)`
+   `export NVCC_FLAGS="-gencode arch=compute_${NVCC_COMPUTE_CAP},code_${NVCC_COMPUTE_CAP}"`
+     
+   e.g.,:-
+   For GA100 (Ampere):
+   `export NVCC_FLAGS="-gencode arch=compute_80,code=sm_80"`
+
+   For Jetson AGX Xavier (Volta):
+   `export NVCC_FLAGS="-gencode arch=compute_70,code=sm_70"`
+
+4. Activate conda environment.
+   `. /opt/anaconda3/bin/activate`
+   `conda activate eatss-profile`
+
+5. Run profiling commands:
+   (platform detection is automated)
+
+   Profiling commands applicable to both GA100 & Jetson AGX Xavier
+   ===============================================================
+    5.1 To profile with EATSS tile sizes:
+
+    `cp /home/eatss-gpu/tile-size-selector/a100-wf10.tiles /home/eatss-gpu/profile/oracle/a100.tiles`
+    `python eatss_profile.py --tile-strategy load_from_file --multi-dataset --override-iter 100 --warp-frac 1.00`
+
+
+    5.2 To explore the search space by generating many tile sizes for each benchmark:
+
+    `python eatss_profile.py --tile-strategy variant_exploration --multi-dataset --cap-shared-mem 1.0 --override-iter 100`
+
+    5.3 To explore the search space by generating many tiles sizes:
+    for each benchmark while restricting the amount of shared
+    memory available:
+
+    `python eatss_profile.py --run-special --tile-strategy custom --cap-shared-mem 1.0 --multi-dataset --dataset EXTRALARGE`
+
+    Profiling commands applicable only to GA100
+    ===========================================
+    5.4 To profile with EATSS for non-Polybench benchmarks:
+
+    `cp /home/eatss-gpu/tile-size-selector/a100-heavy.tiles /home/eatss-gpu/profile/oracle/a100-heavy.tiles`
+    `python run_external.py --tile-strategy load_from_file`
+
+    5.5 To profile the gemm benchmark with varying matrix sizes:
+
+    `python vary_gemm_input_size_profile.py`
+
+    5.6 To profile selected Polybench and non-Polybench benchmarks with varying matrix sizes:
+
+    `python vary_input_size_profile.py`
+
+6. Experiment Customization
+   Profiling commands can be customized using the following flags:
+   
+   python eatss_profile.py --help
+
+   output:
+     eatss_profile:
+       --tile-strategy        specifies the method of tile size selection
+                              * load_from_file: loads the tile sizes from a given file.
+                              * variant_exploration: performs a search space 
+                                                     exploration by selecting
+                                                     many tile size choices.
+                              * custom: customized search space exploration with
+                                        shared memory restrictions (see  
+                                        --cap-shared-mem for more).
+
+       --cap-shared-mem       restricts available shared memory on the GPU
+                              when performing code generation. A floating point 
+                              number between 0 and 1 (0=no shared memory is used,
+                              1=all available shared memory will be used).
+
+       --run-special          limits the benchmark execution to 2mm, 3mm, gemm, 
+                              fdtd-2d, jacobi-2d and mvt. If not specified all 
+                              benchmarks are executed in order. When used in
+                              combination with --single isolates the run ONLY to the 
+                              specified benchmark. 
+
+       --multi-dataset        automatically selects the correct benchmark size based
+                              on the GPU platform (i.e. STANDARD, LARGE, EXTRALARGE)
+
+       --dataset              overrides --multi-dataset and allows the user to set
+                              the preferred dataset size of Polybench. Defaults to 
+                              STANDARD.
+
+       --override-iter        modifies the code generation with the specified number
+                              of iterations for measurements. Defaults to 100. For 
+                              accuracy at least 100 iterations must be performed.  
+
+       --cuda-visible-devices specifes the GPU index. Defaults to 0. Allows to change
+                              the GPU of interest in case multiple GPUs are available. 
+
+       --warp-frac            EXPERIMENTAL. Use in conjunction with load_from_file
+                              (--tile-strategy). The value is 0.5 / 1.0 depending 
+                              on whether the half warp / full warp was used for 
+                              tile size generation.
+
+7. Validation
+   Additional scripts are provided to validate the performance. 
+
+   Navigate to the visualize folder.
+   `cd eatss-gpus/eatss-gpus/visualize`
+ 
+   Execute validation script.
+   `python main.py`
+
+   The results should correspond to Fig.~7(a)[GA100] or Fig.~7(b)[AGX Xavier].
+   
+   

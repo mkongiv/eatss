@@ -1,0 +1,10 @@
+1
+fdtd:iz*,iy*,ix*
+7
+Ex1:iz,iy,ix:512,512,512
+Ex2:iz,iy,ix:512,512,512
+Ey:iz,iy,ix:512,512,512
+Hz:iz,iy,ix:512,512,512
+Bza:iz,iy,ix:512,512,512
+tmp:iz,iy:512,512
+clf:iz,iy:512,512
